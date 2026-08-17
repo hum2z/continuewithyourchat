@@ -109,9 +109,14 @@ Copy the skill into your Claude Code skills directory:
 
 ```bash
 git clone https://github.com/hum2z/continuewithyourchat.git
+mkdir -p ~/.claude/skills
 cp -r continuewithyourchat/.claude/skills/previous ~/.claude/skills/
 python3 ~/.claude/skills/previous/scripts/pmem.py install-hook
 ```
+
+The `mkdir` matters: without an existing `skills/` directory, `cp -r` copies
+the skill's *contents* there instead of the folder itself, and Claude Code
+won't find it.
 
 Then start a new session and run `/previous`. On a fresh project it'll tell you
 there's nothing yet — that's the expected first run. Work normally, close the
