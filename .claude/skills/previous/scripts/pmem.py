@@ -155,9 +155,28 @@ def scope_for(start: Path) -> tuple[str, str, Path]:
     return f"{_slugify(root.name)}--{digest}", root.name, root
 
 
+def repo_scope_dir(start: Path) -> Path | None:
+    """Repo-local memory, if this project has opted into it.
+
+    Ephemeral environments — Claude Code on the web, CI containers — throw away
+    the home directory between sessions, so `~/.claude/previous` has nothing to
+    persist into. The repo is the only thing that survives, so a project can
+    keep its memory in `.claude/previous/` and carry it in version control.
+    """
+    candidate = project_root(start) / ".claude" / "previous"
+    return candidate if candidate.is_dir() else None
+
+
 def scope_dir(start: Path, use_global: bool) -> Path:
+    # The global layer stays in $HOME even in repo mode: it is cross-project by
+    # definition, so burying it inside one repo would be wrong. On an ephemeral
+    # host that means global memory does not persist — a real limitation, but
+    # preferable to one project silently owning everyone's preferences.
     if use_global:
         return GLOBAL_DIR
+    repo = repo_scope_dir(start)
+    if repo is not None:
+        return repo
     slug, _, _ = scope_for(start)
     return PROJECTS_DIR / slug
 
@@ -279,6 +298,7 @@ def cmd_path(args) -> int:
             {
                 "slug": "global" if args.use_global else slug,
                 "label": "global" if args.use_global else label,
+                "mode": "repo" if repo_scope_dir(start) else "home",
                 "project_root": str(root),
                 "scope_dir": str(d),
                 "memory": str(d / "MEMORY.md"),
@@ -307,7 +327,7 @@ def _tail_entries(log_text: str, n: int) -> str:
 def cmd_show(args) -> int:
     start = Path(args.dir).resolve()
     slug, label, root = scope_for(start)
-    proj = PROJECTS_DIR / slug
+    proj = scope_dir(start, False)
 
     have_global = (GLOBAL_DIR / "MEMORY.md").exists()
     have_proj = (proj / "MEMORY.md").exists()
@@ -408,7 +428,7 @@ def _file_stats(path: Path) -> dict:
 def cmd_stats(args) -> int:
     start = Path(args.dir).resolve()
     slug, label, _ = scope_for(start)
-    proj = PROJECTS_DIR / slug
+    proj = scope_dir(start, False)
 
     mem = _file_stats(proj / "MEMORY.md")
     log = _file_stats(proj / "log.md")
@@ -444,6 +464,7 @@ def cmd_stats(args) -> int:
         json.dumps(
             {
                 "label": label,
+                "mode": "repo" if repo_scope_dir(start) else "home",
                 "scope_dir": str(proj),
                 "memory": mem,
                 "log": log,
@@ -731,7 +752,7 @@ def cmd_hint(args) -> int:
     except OSError:
         return 0
 
-    proj = PROJECTS_DIR / slug
+    proj = scope_dir(start, False)
     memory = _strip_scaffolding(_read(proj / "MEMORY.md"))
     pending = _pending_files(proj)
     if not memory and not pending:
@@ -780,6 +801,59 @@ def cmd_clear_pending(args) -> int:
     for f in files:
         f.unlink(missing_ok=True)
     print(f"cleared {len(files)} pending capture(s)")
+    return 0
+
+
+REPO_GITIGNORE = """# Transient — regenerated on demand, noisy in diffs.
+backups/
+archive/
+"""
+
+
+def cmd_use_repo(args) -> int:
+    """Move this project's memory into the repo so it survives an ephemeral host.
+
+    Claude Code on the web clones fresh and reclaims the container afterwards,
+    so home-directory memory never outlives a session there. Committed repo
+    memory does.
+    """
+    start = Path(args.dir).resolve()
+    root = project_root(start)
+    dest = root / ".claude" / "previous"
+
+    if dest.is_dir():
+        print(f"already using repo-local memory at {dest}")
+        return 0
+
+    _, label, _ = scope_for(start)
+    slug, _, _ = scope_for(start)
+    home_scope = PROJECTS_DIR / slug
+
+    dest.mkdir(parents=True, exist_ok=True)
+    moved = False
+    if home_scope.is_dir():
+        for item in home_scope.iterdir():
+            if item.name in ("backups", "archive"):
+                continue
+            target = dest / item.name
+            if not target.exists():
+                shutil.move(str(item), str(target))
+                moved = True
+
+    (dest / ".gitignore").write_text(REPO_GITIGNORE, encoding="utf-8")
+    ensure_scope(start, False)
+
+    rel = dest.relative_to(root)
+    print(
+        f"{'Migrated' if moved else 'Created'} repo-local memory at {rel}/\n"
+        f"  label: {label}\n\n"
+        "It only persists if you commit it — an ephemeral container discards\n"
+        "anything uncommitted when the session ends:\n\n"
+        f"  git add {rel} && git commit -m 'Add project memory'\n\n"
+        "Note this puts memory under version control, visible to anyone with\n"
+        "repo access. To go back, move the directory away:\n"
+        f"  mv {rel} ~/.claude/previous/projects/{slug}"
+    )
     return 0
 
 
@@ -875,6 +949,9 @@ def main() -> int:
     )
     common(sub.add_parser("clear-pending", help="drop distilled captures"), False).set_defaults(
         func=cmd_clear_pending, use_global=False
+    )
+    common(sub.add_parser("use-repo", help="keep memory in the repo, not $HOME"), False).set_defaults(
+        func=cmd_use_repo, use_global=False
     )
     sub.add_parser("install-hook", help="register the SessionEnd hook").set_defaults(
         func=cmd_install_hook

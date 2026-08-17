@@ -151,6 +151,38 @@ that led nowhere.
 
 ---
 
+## Claude Code on the web
+
+The web app runs each session in a throwaway container: fresh clone at the
+start, reclaimed at the end. `~/.claude/` doesn't survive that, so the default
+setup has nowhere to persist to.
+
+The repo does survive. Switch a project to repo-local memory:
+
+```bash
+python3 ~/.claude/skills/previous/scripts/pmem.py use-repo
+git add .claude/previous && git commit -m "Add project memory"
+```
+
+Memory then lives in `.claude/previous/` and travels with the clone. Any
+existing memory for that project is migrated over. Committing the skill itself
+to `.claude/skills/previous/` makes it load in web sessions too — repo skills
+are picked up automatically, nothing to install.
+
+Two things to know before you turn this on:
+
+- **It only persists if you commit it.** The auto-capture writes into your
+  working tree, but an uncommitted file dies with the container. On web, run
+  `/previous save` during the session and commit the result alongside your
+  normal changes.
+- **It's in version control.** Anyone with repo access can read it. Fine for a
+  solo project; think twice on a shared one, and keep anything sensitive out.
+
+`backups/` and `archive/` are gitignored automatically — they're regenerable
+and would just be noise in diffs. `pmem.py stats` reports which mode you're in.
+
+---
+
 ## Where memory lives
 
 ```

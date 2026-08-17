@@ -61,6 +61,20 @@ python3 <skill>/scripts/pmem.py install-hook    # turn on both hooks
 
 `--global` targets the cross-project layer. `PREVIOUS_AUTO=0` pauses capture.
 
+### Ephemeral hosts
+
+Claude Code on the web clones the repo fresh and reclaims the container
+afterwards, so `~/.claude/previous` never outlives a session there. If a
+project has a `.claude/previous/` directory, memory is stored there instead —
+in the repo, which is the only thing that survives. `pmem.py use-repo` switches
+a project over and migrates any existing memory.
+
+Repo mode changes one thing about your job: **memory only persists if it gets
+committed**. On an ephemeral host, distil and consolidate *during* the session
+rather than counting on the next one, and include `.claude/previous` in the
+commit you were making anyway. Say so plainly when you do it — the user is
+putting memory under version control, and should know it's there.
+
 | What the user says | What to do |
 |---|---|
 | `/previous`, "catch me up" | **Restore** |
