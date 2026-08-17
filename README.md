@@ -172,3 +172,7 @@ The underlying plumbing is a small script if you want it directly:
 python3 ~/.claude/skills/previous/scripts/pmem.py show
 python3 ~/.claude/skills/previous/scripts/pmem.py stats
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
