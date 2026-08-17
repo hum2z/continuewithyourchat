@@ -1,193 +1,184 @@
 ---
 name: previous
-description: Persistent memory across chat sessions. Restores what happened in earlier conversations about this project, and saves the current one so the next chat starts informed instead of blank. Use this whenever the user runs /previous, or says anything like "catch me up", "what were we doing", "continue where we left off", "pick up from last time", "you should remember this", "save this for next time", "checkpoint this", or "remind me what we decided". Also use it at the START of a session when the user refers to earlier work as if you should already know it ("the thing we built yesterday", "that bug we were chasing") — that means memory exists and should be loaded before answering. And offer it at the END of a substantial session, before the context is lost.
+description: Persistent memory across chat sessions. Restores what happened in earlier conversations about this project, and keeps that memory compacted as it grows. Use this whenever the user runs /previous, or says anything like "catch me up", "what were we doing", "continue where we left off", "pick up from last time", "you should remember this", "save this for next time", "checkpoint this", or "remind me what we decided". Also use it at the START of a session when the user refers to earlier work as if you should already know it ("the thing we built yesterday", "that bug we were chasing") — that means memory exists and should be loaded before answering.
 ---
 
 # previous
 
 Chat sessions are amnesiac. Every new one starts from nothing, so the user
 re-explains the same project, the same constraints, the same "no, we don't do
-it that way" corrections they gave last week. That tax is what this skill
-removes.
+it that way" corrections they gave last week. That tax is what this removes.
 
-It maintains a small, hand-tended digest per project that gets **rewritten and
-re-distilled** on every save. The key word is rewritten. A log that only ever
-grows becomes useless at exactly the moment it becomes valuable — 40 sessions
-in, nobody can find anything, and loading it costs more context than it saves.
-Compounding means the digest gets *smarter* over time, not longer.
+## The shape of it
 
-## Where things live
+Three tiers, cheapest first. This split exists because memory is a cost that
+recurs *every session forever*, so the expensive step has to be rare:
+
+| Tier | When | Model cost |
+|---|---|---|
+| **Capture** | Automatically, at session end (`SessionEnd` hook) | **Zero** — pure Python |
+| **Distil** | Next `/previous`, if captures are waiting | ~300 in / ~100 out per session |
+| **Consolidate** | Once ~5 log entries have built up | One rewrite, amortised |
+
+Capture is free because it never involves you: a script reads the raw
+transcript and keeps only what a human actually typed. In a real session that
+turned 147k tokens of transcript into 280 tokens of capture. Everything else
+was tool output — bulk without durable signal.
 
 ```
 ~/.claude/previous/
-├── global/                  things true everywhere: who they are, how they like things
-│   ├── MEMORY.md
-│   └── log.md
-└── projects/<slug>/         one per repo, keyed by git remote (or path hash)
-    ├── MEMORY.md            the living digest — rewritten in full on each save
-    ├── log.md               append-only, one entry per session
-    ├── meta.json
-    ├── backups/             last 5 versions of MEMORY.md
-    └── archive/             folded-away old log entries
+├── global/MEMORY.md         things true everywhere (preferences, working style)
+└── projects/<slug>/         keyed by git remote, so laptop and container share
+    ├── MEMORY.md            the digest — rewritten whole when consolidating
+    ├── log.md               distilled session entries
+    ├── pending/             raw auto-captures awaiting distillation
+    ├── backups/  archive/
 ```
 
-Use `scripts/pmem.py` for all path resolution, reading, appending, backups, and
-rotation. It exists so you never have to guess where a file is or hand-roll the
-scoping logic. Run it from the project directory:
+## Commands
+
+Run `scripts/pmem.py` from the project directory — it handles scope resolution,
+reading, backups and rotation so you never guess at paths:
 
 ```bash
-python3 <skill>/scripts/pmem.py show          # global + project memory + recent sessions
-python3 <skill>/scripts/pmem.py stats         # sizes, and whether it's time to re-compact
-python3 <skill>/scripts/pmem.py path          # where everything lives, as JSON
-python3 <skill>/scripts/pmem.py list          # every project with memory
-python3 <skill>/scripts/pmem.py backup        # snapshot MEMORY.md before rewriting it
-python3 <skill>/scripts/pmem.py log --title T # append a session entry (body on stdin)
-python3 <skill>/scripts/pmem.py archive       # rotate log.md after folding it in
+python3 <skill>/scripts/pmem.py show           # global + project + pending (the restore payload)
+python3 <skill>/scripts/pmem.py show --brief    # digest only, skips log and captures
+python3 <skill>/scripts/pmem.py stats           # sizes, restore cost in tokens, what needs doing
+python3 <skill>/scripts/pmem.py log --title T   # append a distilled entry (body on stdin)
+python3 <skill>/scripts/pmem.py clear-pending   # drop captures once distilled
+python3 <skill>/scripts/pmem.py backup          # snapshot MEMORY.md before rewriting
+python3 <skill>/scripts/pmem.py archive         # rotate log.md
+python3 <skill>/scripts/pmem.py list            # every project with memory
+python3 <skill>/scripts/pmem.py install-hook    # turn on automatic capture
 ```
 
-Every command takes `--global` to target the cross-project layer instead
-(except `show` and `stats`, which always report both).
-
-## Dispatch
+`--global` targets the cross-project layer. `PREVIOUS_AUTO=0` pauses capture.
 
 | What the user says | What to do |
 |---|---|
-| `/previous`, "catch me up", "where were we" | **Restore** |
-| `/previous save`, "save this", "checkpoint" | **Save** |
-| `/previous list` | Run `pmem.py list`, summarise briefly |
-| `/previous edit` | Open the project `MEMORY.md` for direct editing |
-| `/previous forget <thing>` | Find it in `MEMORY.md`, back up, remove it, confirm what went |
+| `/previous`, "catch me up" | **Restore** |
+| `/previous save`, "checkpoint" | **Save** |
+| "turn on auto-save" | `install-hook`, then confirm in one line |
+| `/previous list` | `pmem.py list`, summarise briefly |
+| `/previous forget <thing>` | Back up, remove it from `MEMORY.md`, confirm what went |
 
 ---
 
 ## Restore
 
-1. Run `pmem.py show`. If it reports no memory, say so in one line and carry
-   on with the actual request — do not treat a fresh start as a problem.
-2. Read what comes back. It is now your working context; do not print it back
-   to the user.
-3. Give a **short orientation**, not a recital. Aim for something like:
+1. Run `pmem.py show`. If it reports no memory, say so in one line and get on
+   with the actual request — a fresh start is not a problem to be solved.
+2. **If it lists pending captures, distil them now** (below). This is the only
+   moment that reliably happens, so it's where automatic memory gets folded in.
+3. Give a **short orientation** — three to six lines, not a recital:
 
-   > Picked up where we left off on **auth-service**. Last session you moved
-   > token refresh onto the worker queue and hit a race in `RefreshLock`.
-   > Open: the Redis TTL question, and the staging deploy is still blocked on
-   > the cert. You'd decided against the middleware approach.
+   > Picked up on **auth-service**. Last session you moved token refresh onto
+   > the worker queue and hit a race in `RefreshLock`. Open: the staging cert.
+   > You'd already ruled out the middleware approach.
 
-   Three to six lines. Lead with the most recent state, then open threads,
-   then anything they'd want to be reminded they'd already ruled out.
-4. If they asked a question alongside `/previous`, answer it — the restore is
-   the setup, not the deliverable.
+   Lead with current state, then open threads, then anything they'd want to be
+   reminded they'd ruled out. They wrote this memory to *skip* the recap; a
+   wall of text is the recap.
+4. If they asked a question alongside `/previous`, answer it. The restore is
+   setup, not the deliverable.
 
-The reason to keep the orientation tight: they wrote this memory so they could
-*skip* the recap, and a wall of text is the recap. What they need is enough to
-re-enter the problem, plus the confidence that you know the rest.
+### Distilling pending captures
+
+A capture is raw: the user's turns verbatim, files touched, notable commands.
+Your job is to compress each into **3-6 bullets** of what's durable, append it
+with `pmem.py log --title "<short title>"`, then run `pmem.py clear-pending`.
+
+Compress hard. A capture holds everything a session *mentioned*; a log entry
+holds only what a future session would need. Most sessions yield two or three
+bullets, and some yield none — if a captured session produced nothing durable,
+say so and clear it rather than manufacturing filler.
+
+Then check `pmem.py stats`: once there are ~5 log entries, consolidate.
 
 ## Save
 
-**Back up before you write.** Run `pmem.py backup` first, always. You are about
-to replace a file that represents weeks of accumulated context, and the failure
-mode — a bad rewrite that quietly drops half of it — is invisible until much
-later.
+Two different jobs share this name; pick by what's actually accumulated.
 
-Then:
+**Light save** — append a distilled entry to `log.md` and stop. This is right
+when the session produced a few facts but the digest is still accurate. Cheap,
+and most saves should be this.
 
-1. Run `pmem.py stats` to see whether you're over budget and need to be
-   aggressive about pruning.
-2. Read the current project `MEMORY.md` in full. You cannot merge into
-   something you haven't read.
-3. Go back over **this** session and pull out what's durable (see below).
-4. Rewrite `MEMORY.md` as a whole — the old content and the new, reconciled
-   into one document. Not the old file with a new section stapled on.
-5. Append a short session entry to `log.md` via `pmem.py log` — 3-6 bullets on
-   what actually happened, so there's a raw record behind the digest.
-6. If anything belongs to the *user* rather than the project — a preference, a
-   working style, a standing instruction — put it in the global layer with
-   `--global` instead.
-7. Tell them in one line what you saved and roughly how big the digest is now.
+**Consolidation** — rewrite `MEMORY.md` whole. Do this when ~5 entries have
+built up, when `stats` says you're over budget, or when the digest has gone
+stale enough to mislead.
+
+To consolidate:
+
+1. **`pmem.py backup` first, always.** You're about to replace a file holding
+   weeks of context, and a bad rewrite that quietly drops half of it stays
+   invisible until the moment it matters.
+2. Read the current `MEMORY.md` in full — you can't merge into something you
+   haven't read — plus the log entries since the last consolidation.
+3. Rewrite it as one document: old and new reconciled. Not the old file with a
+   new section stapled on.
+4. `pmem.py archive` if the log has grown past budget.
+5. Anything about the *user* rather than the project — a preference, a standing
+   instruction — goes to the global layer with `--global`.
+6. Report in one line what you saved and the new restore cost from `stats`.
 
 ### What's worth keeping
 
-The test is: **would a competent stranger picking this up next week need it,
-and could they not get it from reading the code?**
+The test: **would a competent stranger picking this up next week need it, and
+could they not get it from reading the code?**
 
-Worth keeping:
+Keep decisions **and their reasoning** — without the why, the next session
+re-opens a settled question. Keep corrections the user made ("no, we use X
+here"); those are the highest-value lines in the file because they cost real
+effort to transmit. Keep preferences, environment gotchas, what's half-done,
+and dead ends — what was tried, what broke, why — which are cheap to record and
+expensive to rediscover.
 
-- **Decisions and the reasoning behind them.** The reasoning matters more than
-  the decision — without it, the next session re-opens a settled question.
-- **Corrections the user made.** When someone says "no, we use X here", that's
-  a durable fact about their world that cost them effort to transmit. These
-  are the single highest-value thing in the file.
-- **Preferences and conventions.** How they want commits written, what they
-  never want touched, whether they want to be asked before big refactors.
-- **Dead ends.** What was tried, what broke, why it was abandoned. Cheap to
-  record, expensive to rediscover, and almost always forgotten.
-- **Environment gotchas.** The test that only passes with a flag, the service
-  that must be running, the thing that looks broken but isn't.
-- **In-flight state.** What's half-done and what the next move was going to be.
-
-Not worth keeping:
-
-- Anything readable from the code in ten seconds. The memory should point at
-  the codebase, not duplicate it.
-- Blow-by-blow narration of the session.
-- Transient debugging that led nowhere and taught nothing.
-- Praise, filler, and your own commentary on how the session went.
+Drop anything readable from the code in ten seconds, blow-by-blow narration,
+transient debugging that taught nothing, and your own commentary on how the
+session went. The memory should point at the codebase, not duplicate it.
 
 ### How to merge
 
-This is the part that determines whether the file is still useful a year in.
+This is what makes the file compound instead of accrete:
 
-- **Supersede, don't accumulate.** If a new decision overrides an old one,
-  replace it and note the change — `Moved to Postgres (was SQLite; hit
-  concurrent-write limits, 2026-03)`. One line carrying both the current state
-  and the history beats two lines contradicting each other.
-- **Resolve open threads.** Anything in *Open threads* that got settled this
-  session moves into *Decisions* or disappears. A stale open thread is worse
-  than no note, because it sends the next session chasing something finished.
-- **Merge duplicates.** Three sessions each noting the same env quirk collapse
-  to one clear line.
-- **Promote repeats.** Something that keeps recurring across sessions has
-  proven it's structural — move it up into *Stable facts* where it'll be read
-  first.
-- **Let things die.** A decision nobody has touched in months, about code that
-  no longer exists, is noise. Dropping it is part of the job. (The backups are
-  right there if you're wrong.)
-- **Keep the voice plain.** Short declarative lines. This is a working note,
-  not a report.
+- **Supersede, don't accumulate.** `Moved to Postgres (was SQLite; hit
+  concurrent-write limits, 2026-03)` — one line carrying current state *and*
+  history beats two lines contradicting each other.
+- **Resolve open threads.** Anything settled leaves the open list. A stale open
+  thread is worse than no note; it sends the next session chasing finished work.
+- **Merge duplicates.** Three sessions noting the same quirk collapse to one.
+- **Promote repeats.** Something recurring across sessions has proven it's
+  structural — move it into *Stable facts*, which gets read first.
+- **Let things die.** A decision about code that no longer exists is noise.
+  Dropping it is part of the job; the backups are right there if you're wrong.
 
-### Budgets
+Budgets from `stats`: `MEMORY.md` past ~400 lines means merge harder; `log.md`
+past ~40 entries means fold and archive. If a save would blow the budget and
+there's genuinely nothing to cut, say so — that usually means the project has
+outgrown one file, and the user should get to decide.
 
-`pmem.py stats` flags these; treat them as pressure to distil, not hard limits:
+`references/memory-format.md` has the section layout and a worked before/after
+merge where the file covers an extra session and comes out *shorter*. Read it
+the first few times you consolidate, or when the existing file is messy.
 
-- `MEMORY.md` over ~400 lines → merge harder, drop resolved items.
-- `log.md` over ~600 lines or ~40 entries → fold anything still durable into
-  `MEMORY.md`, then run `pmem.py archive` to rotate it.
+## Cost discipline
 
-If a save would push the digest well past budget and there's genuinely nothing
-to cut, say so rather than silently letting it bloat — that usually means the
-project has grown enough to want splitting, and the user should get to decide.
+The user is paying for this on every session, so treat restore size as a number
+you're responsible for. `stats` reports `restore_cost_tokens`; a healthy
+project sits in the hundreds. If it drifts past ~2k, the digest has stopped
+being a digest — consolidate rather than letting it slide.
 
-The structure of `MEMORY.md` and a worked before/after example of a good merge
-are in `references/memory-format.md`. Read it the first few times you do a
-save, especially if the existing file is large or messy.
-
----
+Two habits that matter: never print restored memory back to the user (it's
+already in your context — repeating it doubles the cost for zero gain), and
+prefer `show --brief` when you only need orientation and not the full history.
 
 ## Offering to save
 
-The user chose manual saves with nudges, so the nudge is your job — they'll
-usually be deep in the work and won't think of it.
+Capture is automatic once the hook is installed, so the user doesn't need
+prompting to preserve a session — it's already preserved. Mention saving only
+when consolidation is genuinely due (`stats` says so), or when they've said
+something durable that they'd want in the *global* layer, which capture won't
+classify on its own.
 
-Offer once, in a single line, when:
-
-- A substantial piece of work just landed (feature done, bug fixed, decision
-  reached) and the session is winding down.
-- The conversation has gone long and is clearly rich in context worth keeping.
-- They say something that's plainly durable — a preference, a constraint, a
-  correction — mid-session. Then it's worth asking whether to save it now, so
-  it survives even if the session ends abruptly.
-
-Don't offer after trivial exchanges, don't offer twice in a row after being
-declined, and never save without being asked. A memory file that fills up with
-unrequested checkpoints stops being trustworthy, and trust is the whole
-product here.
+If the hook isn't installed, offer `install-hook` once — after that, drop it.
+Nagging about memory hygiene is its own kind of tax.

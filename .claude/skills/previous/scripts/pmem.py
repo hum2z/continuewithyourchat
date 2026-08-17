@@ -42,6 +42,22 @@ LOG_LINE_BUDGET = 600
 LOG_ENTRY_BUDGET = 40
 KEEP_BACKUPS = 5
 
+# A session's durable content lives almost entirely in what the user typed --
+# in a real session, 108 transcript records / 378KB boiled down to 4 user turns.
+# Capping each turn keeps a captured session around 1k tokens instead of 90k.
+MAX_TURN_CHARS = 700
+MAX_TURNS = 25
+MAX_FILES = 25
+MAX_CMDS = 12
+CONSOLIDATE_AFTER = 5  # log entries before MEMORY.md is worth rewriting
+
+SYS_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+CMD_TAG_RE = re.compile(r"<command-(name|message|args|contents)>.*?</command-\1>", re.S)
+INTERESTING_CMD_RE = re.compile(
+    r"\b(git (commit|push|revert|merge|rebase|tag)|pytest|jest|vitest|"
+    r"(npm|pnpm|yarn|make|cargo|go|mix) (test|run|build)|tox|rspec)\b"
+)
+
 MEMORY_TEMPLATE = """# Memory — {label}
 
 _Started {date}. Rewritten in full on each save; do not append blindly._
@@ -202,6 +218,43 @@ def _read(path: Path) -> str:
         return ""
 
 
+def _strip_scaffolding(md: str) -> str:
+    """Remove template hint lines and empty sections before handing memory to a
+    model. Restore happens every session, so boilerplate that never changes is
+    a tax paid over and over — the italic prompts under each heading are for
+    whoever edits the file by hand, not for the reader."""
+    kept = [
+        ln
+        for ln in md.splitlines()
+        if not (ln.strip().startswith("_") and ln.strip().endswith("_") and len(ln.strip()) > 2)
+    ]
+
+    out: list[str] = []
+    i = 0
+    while i < len(kept):
+        line = kept[i]
+        if line.startswith("## "):
+            j = i + 1
+            body: list[str] = []
+            while j < len(kept) and not kept[j].startswith(("## ", "# ")):
+                body.append(kept[j])
+                j += 1
+            if any(b.strip() for b in body):
+                out.append(line)
+                out.extend(body)
+            i = j
+        else:
+            out.append(line)
+            i += 1
+
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
+def _tokens(text: str) -> int:
+    """Rough token estimate — good enough to reason about budget."""
+    return len(text) // 4
+
+
 def _bump_meta(d: Path, **fields) -> None:
     path = d / "meta.json"
     try:
@@ -258,8 +311,9 @@ def cmd_show(args) -> int:
 
     have_global = (GLOBAL_DIR / "MEMORY.md").exists()
     have_proj = (proj / "MEMORY.md").exists()
+    pending = _pending_files(proj)
 
-    if not have_global and not have_proj:
+    if not have_global and not have_proj and not pending:
         print(
             f"NO MEMORY YET for this project ({label}).\n"
             f"Would live at: {proj}\n"
@@ -267,36 +321,45 @@ def cmd_show(args) -> int:
         )
         return 0
 
-    out: list[str] = [
-        f"# Restored context for {label}",
-        f"_Project root: {root}_",
-        "",
-    ]
+    out: list[str] = [f"# Restored context for {label} ({root})", ""]
+
+    def _digest(path: Path) -> None:
+        # A file whose sections are all still empty carries nothing but its own
+        # title; printing that just invites the reader to wonder what they missed.
+        body = _strip_scaffolding(_read(path))
+        if body and "## " in body:
+            out.extend([body, ""])
 
     if have_global:
-        out += ["---", "", _read(GLOBAL_DIR / "MEMORY.md").rstrip(), ""]
-
+        _digest(GLOBAL_DIR / "MEMORY.md")
     if have_proj:
-        out += ["---", "", _read(proj / "MEMORY.md").rstrip(), ""]
+        _digest(proj / "MEMORY.md")
+
+    if not args.brief:
         recent = _tail_entries(_read(proj / "log.md"), args.log_entries)
         if recent:
-            out += [
-                "---",
-                "",
-                f"# Recent sessions (last {args.log_entries})",
-                "",
-                recent,
-                "",
-            ]
-    else:
+            out += [f"# Recent sessions (last {args.log_entries})", "", recent, ""]
+
+    if pending:
         out += [
-            "---",
-            "",
-            f"No project-specific memory yet for {label} — only the global layer above.",
+            f"# {len(pending)} session(s) captured automatically, not yet distilled",
             "",
         ]
+        if args.brief:
+            out += [
+                "Run `pmem.py pending` to read them:",
+                "",
+            ] + [f"- {f.stem[:8]}" for f in pending]
+        else:
+            out += [
+                "Fold these into the log (and MEMORY.md if enough has accumulated),",
+                "then run `pmem.py clear-pending`. Raw capture follows:",
+                "",
+            ] + [_read(f).rstrip() + "\n" for f in pending]
 
-    print("\n".join(out))
+    text = "\n".join(out)
+    print(text)
+    print(f"\n<!-- restored ~{_tokens(text)} tokens -->", file=sys.stderr)
     return 0
 
 
@@ -350,8 +413,22 @@ def cmd_stats(args) -> int:
     mem = _file_stats(proj / "MEMORY.md")
     log = _file_stats(proj / "log.md")
     glob = _file_stats(GLOBAL_DIR / "MEMORY.md")
+    pending = _pending_files(proj)
+
+    restore_cost = _tokens(
+        _strip_scaffolding(_read(GLOBAL_DIR / "MEMORY.md"))
+        + _strip_scaffolding(_read(proj / "MEMORY.md"))
+        + _tail_entries(_read(proj / "log.md"), 3)
+        + "".join(_read(f) for f in pending)
+    )
 
     needs = []
+    if len(pending) or log.get("entries", 0) >= CONSOLIDATE_AFTER:
+        needs.append(
+            f"{len(pending)} pending capture(s), {log.get('entries', 0)} log entries "
+            f"— distil the captures into log entries; rewrite MEMORY.md once "
+            f"{CONSOLIDATE_AFTER}+ entries have built up, then `pmem.py clear-pending`"
+        )
     if mem["lines"] > MEMORY_LINE_BUDGET:
         needs.append(
             f"MEMORY.md is {mem['lines']} lines (budget {MEMORY_LINE_BUDGET}) "
@@ -371,6 +448,8 @@ def cmd_stats(args) -> int:
                 "memory": mem,
                 "log": log,
                 "global_memory": glob,
+                "pending_captures": len(pending),
+                "restore_cost_tokens": restore_cost,
                 "needs_compaction": needs,
             },
             indent=2,
@@ -455,6 +534,243 @@ def cmd_archive(args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# automatic capture (runs from the SessionEnd hook — no model involved)
+# --------------------------------------------------------------------------- #
+
+def _text_of(message) -> str:
+    """Pull human-readable text out of a transcript message, ignoring tool
+    traffic and thinking blocks — those are bulk without much durable signal."""
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return ""
+
+
+def _clean(text: str) -> str:
+    text = SYS_REMINDER_RE.sub("", text)
+    text = CMD_TAG_RE.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _truncate(text: str, limit: int) -> str:
+    text = " ".join(text.split()) if len(text) > limit else text
+    return text if len(text) <= limit else text[:limit].rstrip() + " […]"
+
+
+def extract_transcript(path: Path) -> dict:
+    """Reduce a transcript JSONL to the parts worth remembering."""
+    turns: list[str] = []
+    files: list[str] = []
+    cmds: list[str] = []
+    last_reply = ""
+    first_ts = last_ts = None
+    session_id = cwd = None
+
+    try:
+        handle = path.open(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+
+    with handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            session_id = d.get("sessionId") or session_id
+            cwd = d.get("cwd") or cwd
+            ts = d.get("timestamp")
+            if ts:
+                first_ts = first_ts or ts
+                last_ts = ts
+
+            if d.get("isSidechain"):
+                continue
+            kind = d.get("type")
+
+            if kind == "user" and not d.get("isMeta"):
+                text = _clean(_text_of(d.get("message")))
+                if text:
+                    turns.append(_truncate(text, MAX_TURN_CHARS))
+
+            elif kind == "assistant":
+                message = d.get("message")
+                text = _clean(_text_of(message))
+                if text:
+                    last_reply = text
+                content = message.get("content") if isinstance(message, dict) else None
+                for block in content if isinstance(content, list) else []:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    name = block.get("name")
+                    args = block.get("input") or {}
+                    if not isinstance(args, dict):
+                        continue
+                    if name in ("Write", "Edit", "NotebookEdit"):
+                        path_arg = args.get("file_path")
+                        if path_arg and path_arg not in files:
+                            files.append(path_arg)
+                    elif name == "Bash":
+                        cmd = (args.get("command") or "").strip()
+                        first = cmd.splitlines()[0] if cmd else ""
+                        if first and INTERESTING_CMD_RE.search(first) and first not in cmds:
+                            cmds.append(_truncate(first, 160))
+
+    return {
+        "session_id": session_id,
+        "cwd": cwd,
+        "started": first_ts,
+        "ended": last_ts,
+        "turns": turns[:MAX_TURNS],
+        "files": files[:MAX_FILES],
+        "commands": cmds[:MAX_CMDS],
+        "last_reply": _truncate(last_reply, 600),
+    }
+
+
+def render_capture(data: dict) -> str:
+    out = [
+        f"### session {(data.get('session_id') or '?')[:8]} "
+        f"({(data.get('started') or '?')[:10]})",
+        "",
+        "**What the user asked for, in their words:**",
+        "",
+    ]
+    for turn in data.get("turns", []):
+        out.append(f"- {turn}")
+    if data.get("files"):
+        out += ["", "**Files touched:** " + ", ".join(f"`{f}`" for f in data["files"])]
+    if data.get("commands"):
+        out += ["", "**Notable commands:**"] + [f"- `{c}`" for c in data["commands"]]
+    if data.get("last_reply"):
+        out += ["", "**Ended with:** " + data["last_reply"]]
+    return "\n".join(out) + "\n"
+
+
+def cmd_capture(args) -> int:
+    """Invoked by the SessionEnd hook with the hook payload on stdin.
+
+    Deliberately silent and always exit 0: a memory tool that makes noise or
+    fails loudly while someone is closing their terminal is worse than one that
+    occasionally misses a session.
+    """
+    payload = {}
+    if not args.transcript:
+        try:
+            raw = sys.stdin.read()
+            payload = json.loads(raw) if raw.strip() else {}
+        except (json.JSONDecodeError, OSError):
+            payload = {}
+
+    transcript = args.transcript or payload.get("transcript_path")
+    if not transcript or not Path(transcript).exists():
+        return 0
+
+    start = Path(payload.get("cwd") or args.dir or ".").resolve()
+    if os.environ.get("PREVIOUS_AUTO", "1") == "0":
+        return 0
+
+    data = extract_transcript(Path(transcript))
+    if not data.get("turns"):
+        return 0  # nothing a human actually said; not worth a file
+
+    d = ensure_scope(start, False)
+    pending = d / "pending"
+    pending.mkdir(exist_ok=True)
+
+    sid = (data.get("session_id") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S"))
+    (pending / f"{sid}.md").write_text(render_capture(data), encoding="utf-8")
+    return 0
+
+
+def _pending_files(d: Path) -> list[Path]:
+    pending = d / "pending"
+    return sorted(pending.glob("*.md")) if pending.exists() else []
+
+
+def cmd_pending(args) -> int:
+    start = Path(args.dir).resolve()
+    d = scope_dir(start, False)
+    files = _pending_files(d)
+    if not files:
+        print("no pending captures")
+        return 0
+    print(f"# {len(files)} captured session(s) awaiting distillation\n")
+    for f in files:
+        print(_read(f).rstrip())
+        print()
+    return 0
+
+
+def cmd_clear_pending(args) -> int:
+    start = Path(args.dir).resolve()
+    d = scope_dir(start, False)
+    files = _pending_files(d)
+    for f in files:
+        f.unlink(missing_ok=True)
+    print(f"cleared {len(files)} pending capture(s)")
+    return 0
+
+
+def cmd_install_hook(args) -> int:
+    """Register the SessionEnd hook in ~/.claude/settings.json, preserving
+    whatever is already configured there."""
+    settings = Path.home() / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        conf = json.loads(_read(settings) or "{}")
+    except json.JSONDecodeError:
+        print(
+            f"{settings} is not valid JSON — fix or move it first; "
+            "refusing to overwrite a file I can't parse.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if settings.exists():
+        shutil.copy2(settings, settings.with_suffix(".json.bak"))
+
+    command = f"python3 {Path(__file__).resolve()} capture"
+    hooks = conf.setdefault("hooks", {})
+    groups = hooks.setdefault("SessionEnd", [])
+
+    for group in groups:
+        for h in group.get("hooks", []):
+            if "pmem.py capture" in str(h.get("command", "")):
+                h["command"] = command
+                settings.write_text(json.dumps(conf, indent=2), encoding="utf-8")
+                print(f"hook already present in {settings} — refreshed its path")
+                return 0
+
+    groups.append(
+        {
+            "matcher": "*",
+            "hooks": [{"type": "command", "command": command, "timeout": 30}],
+        }
+    )
+    settings.write_text(json.dumps(conf, indent=2), encoding="utf-8")
+    print(
+        f"installed SessionEnd hook in {settings}\n"
+        f"  {command}\n"
+        "Sessions are now captured automatically. Set PREVIOUS_AUTO=0 to pause it."
+    )
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="pmem", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -476,7 +792,26 @@ def main() -> int:
 
     sp = common(sub.add_parser("show", help="print global + project memory"), False)
     sp.add_argument("--log-entries", type=int, default=3)
+    sp.add_argument(
+        "--brief",
+        action="store_true",
+        help="digest only — skip log entries and raw captures",
+    )
     sp.set_defaults(func=cmd_show, use_global=False)
+
+    sp = common(sub.add_parser("capture", help="SessionEnd hook entry point"), False)
+    sp.add_argument("--transcript", help="transcript path (else read hook JSON on stdin)")
+    sp.set_defaults(func=cmd_capture, use_global=False)
+
+    common(sub.add_parser("pending", help="show captures awaiting distillation"), False).set_defaults(
+        func=cmd_pending, use_global=False
+    )
+    common(sub.add_parser("clear-pending", help="drop distilled captures"), False).set_defaults(
+        func=cmd_clear_pending, use_global=False
+    )
+    sub.add_parser("install-hook", help="register the SessionEnd hook").set_defaults(
+        func=cmd_install_hook
+    )
 
     sp = common(sub.add_parser("log", help="append a session entry"))
     sp.add_argument("--title", help="short entry title")

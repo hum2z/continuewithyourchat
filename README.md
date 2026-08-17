@@ -8,8 +8,52 @@ you already gave last week. This removes that tax.
 
 ```
 /previous          → catch up: loads what we know about this project
-/previous save     → distil this session into memory
 ```
+
+Sessions save themselves. You only ever type `/previous`.
+
+## Saving is automatic, and free
+
+A `SessionEnd` hook fires when a session closes and runs a plain Python script
+over the transcript. No model involved, so it costs **zero tokens**.
+
+It works because a transcript is almost entirely tool output. In a real
+session, 147k tokens of transcript contained just three things the user
+actually typed — and those turns are where the decisions, corrections, and
+preferences live. Keeping them and discarding the rest is a 500× reduction with
+essentially no loss of signal:
+
+```
+transcript   586 KB   ~147,000 tokens
+capture      1.1 KB       ~280 tokens
+```
+
+Those captures sit in `pending/` until the next time you run `/previous`, when
+they get distilled into a few durable bullets each. The expensive step — a full
+rewrite of the digest — only happens once every ~5 sessions.
+
+Turn it on with:
+
+```bash
+python3 ~/.claude/skills/previous/scripts/pmem.py install-hook
+```
+
+It merges into your existing `~/.claude/settings.json` (backing it up first,
+and refusing to touch it if it isn't valid JSON). Set `PREVIOUS_AUTO=0` to
+pause capture without uninstalling.
+
+## What it costs you
+
+| | |
+|---|---|
+| Capturing a session | **0 tokens** — pure Python at session end |
+| `/previous` on a healthy project | a few hundred tokens |
+| Distilling a captured session | ~300 in, ~100 out, once |
+| Full digest rewrite | every ~5 sessions |
+
+`pmem.py stats` reports `restore_cost_tokens` so the number is never a mystery.
+The digest is also stripped of template boilerplate and empty sections before
+it's loaded, because that's a tax you'd otherwise pay on every single session.
 
 ## How it compounds
 
@@ -50,10 +94,12 @@ Copy the skill into your Claude Code skills directory:
 ```bash
 git clone https://github.com/hum2z/continuewithyourchat.git
 cp -r continuewithyourchat/.claude/skills/previous ~/.claude/skills/
+python3 ~/.claude/skills/previous/scripts/pmem.py install-hook
 ```
 
 Then start a new session and run `/previous`. On a fresh project it'll tell you
-there's nothing yet — that's the expected first run.
+there's nothing yet — that's the expected first run. Work normally, close the
+session, and the next `/previous` will know what you did.
 
 Requires Python 3.9+, which you almost certainly already have.
 
@@ -64,7 +110,8 @@ Requires Python 3.9+, which you almost certainly already have.
 ├── global/MEMORY.md
 └── projects/<repo>/
     ├── MEMORY.md      the living digest
-    ├── log.md         one entry per session
+    ├── log.md         one distilled entry per session
+    ├── pending/       raw auto-captures, cleared once distilled
     ├── backups/       last 5 versions, taken before every rewrite
     └── archive/       folded-away old log entries
 ```
@@ -77,16 +124,23 @@ point `PREVIOUS_HOME` at a synced folder:
 export PREVIOUS_HOME="$HOME/Dropbox/claude-previous"
 ```
 
-## Saving
+## Staying in control
 
-Saves are manual — nothing is written unless you ask. Claude will offer at
-natural stopping points (something just landed, the session is winding down,
-you said something clearly durable), but it won't act on its own. A memory
-file that fills up with unrequested checkpoints stops being trustworthy, and
-trust is the whole point.
+Capture is automatic, but it's deliberately *inert* — the hook only ever writes
+raw material into `pending/`. Nothing enters your actual memory until a session
+distils it, and nothing overwrites the digest without a backup being taken
+first. So the automation can't quietly corrupt anything; the worst it does is
+leave a file you didn't want, which `clear-pending` removes.
 
 `MEMORY.md` is plain markdown. Open it and edit it whenever you like — it's
-meant to be read by humans too.
+meant to be read by humans too. You can also still drive it by hand:
+
+```
+/previous save           distil and consolidate right now
+```
+
+If you'd rather it never ran on its own, skip `install-hook` (or set
+`PREVIOUS_AUTO=0`) and the manual flow works exactly as before.
 
 ## Other commands
 
