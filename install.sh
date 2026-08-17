@@ -41,7 +41,9 @@ curl -fsSL "https://codeload.github.com/$REPO/tar.gz/refs/heads/$REF" \
   | tar xz -C "$TMP" \
   || die "download failed — check the repo name and that '$REF' exists"
 
-SRC="$(find "$TMP" -maxdepth 3 -type d -path '*/.claude/skills/previous' -print -quit)"
+# The tarball wraps everything in a <repo>-<ref>/ directory, so the skill sits
+# four levels down; allow slack in case that wrapper ever changes.
+SRC="$(find "$TMP" -maxdepth 6 -type d -path '*/.claude/skills/previous' -print -quit)"
 [ -n "$SRC" ] || die "archive did not contain .claude/skills/previous"
 
 # Replace rather than merge, so a rename or deletion upstream does not leave a
