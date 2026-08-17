@@ -105,7 +105,18 @@ debugging that led nowhere.
 
 ## Install
 
-Copy the skill into your Claude Code skills directory:
+```bash
+curl -fsSL https://raw.githubusercontent.com/hum2z/continuewithyourchat/main/install.sh | bash
+```
+
+That drops the skill in `~/.claude/skills/previous` and registers both hooks.
+Re-run it any time to upgrade — the skill directory is replaced, and your
+memory in `~/.claude/previous` is never touched.
+
+<details>
+<summary>Rather not pipe a script into bash?</summary>
+
+Read it first (`curl -fsSL .../install.sh | less`), or do it by hand:
 
 ```bash
 git clone https://github.com/hum2z/continuewithyourchat.git
@@ -117,6 +128,8 @@ python3 ~/.claude/skills/previous/scripts/pmem.py install-hook
 The `mkdir` matters: without an existing `skills/` directory, `cp -r` copies
 the skill's *contents* there instead of the folder itself, and Claude Code
 won't find it.
+
+</details>
 
 Then start a new session and run `/previous`. On a fresh project it'll tell you
 there's nothing yet — that's the expected first run. Work normally, close the
