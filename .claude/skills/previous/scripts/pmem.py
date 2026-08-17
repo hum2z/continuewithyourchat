@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -671,7 +672,9 @@ def render_capture(data: dict) -> str:
         "",
     ]
     for turn in data.get("turns", []):
-        out.append(f"- {turn}")
+        # A pasted stack trace or snippet keeps its newlines; without indenting
+        # the continuation, the bullet list silently breaks apart.
+        out.append("- " + turn.replace("\n", "\n  "))
     if data.get("files"):
         out += ["", "**Files touched:** " + ", ".join(f"`{f}`" for f in data["files"])]
     if data.get("commands"):
@@ -857,10 +860,25 @@ def cmd_use_repo(args) -> int:
     return 0
 
 
+def die_shape(key: str, found: str, settings: Path) -> None:
+    print(
+        f"{settings} has '{key}' as {found}, which is not a shape this "
+        "understands.\nFix it by hand (or move the file aside) and re-run — "
+        "refusing to overwrite settings that may hold your own hooks.",
+        file=sys.stderr,
+    )
+
+
 def cmd_install_hook(args) -> int:
     """Register the SessionEnd hook in ~/.claude/settings.json, preserving
     whatever is already configured there."""
-    settings = Path.home() / ".claude" / "settings.json"
+    # On an ephemeral host $HOME is discarded between sessions, so hooks have to
+    # live in the repo's own settings to survive — those are committed and read
+    # back on the next clone.
+    if args.repo:
+        settings = project_root(Path(args.dir).resolve()) / ".claude" / "settings.json"
+    else:
+        settings = Path.home() / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -877,15 +895,47 @@ def cmd_install_hook(args) -> int:
         shutil.copy2(settings, settings.with_suffix(".json.bak"))
 
     script = Path(__file__).resolve()
-    hooks = conf.setdefault("hooks", {})
+
+    # A key holding null carries no configuration, so replacing it loses
+    # nothing. A key holding the wrong *type* may well hold someone's hooks in
+    # a shape we don't understand — bail rather than silently discard them.
+    if conf.get("hooks") is None:
+        conf["hooks"] = {}
+    if not isinstance(conf["hooks"], dict):
+        die_shape("hooks", type(conf["hooks"]).__name__, settings)
+        return 1
+    hooks = conf["hooks"]
+
     results = []
 
     for event, sub in (("SessionEnd", "capture"), ("SessionStart", "hint")):
-        command = f"python3 {script} {sub}"
-        groups = hooks.setdefault(event, [])
+        if args.repo:
+            # Repo settings get committed and read back on a different machine
+            # — often at a different path, with a different interpreter. Both
+            # halves have to stay portable, so resolve the project at run time
+            # and trust `python3` to be on PATH.
+            command = (
+                "python3 ${CLAUDE_PROJECT_DIR}/.claude/skills/previous"
+                f"/scripts/pmem.py {sub}"
+            )
+        else:
+            # Local install: this machine is the only reader, so pin the exact
+            # interpreter known to work — it may not be called `python3`.
+            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} {sub}"
+        if hooks.get(event) is None:
+            hooks[event] = []
+        if not isinstance(hooks[event], list):
+            die_shape(f"hooks.{event}", type(hooks[event]).__name__, settings)
+            return 1
+        groups = hooks[event]
+
         existing = None
         for group in groups:
-            for h in group.get("hooks", []):
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                continue
+            for h in group["hooks"]:
+                if not isinstance(h, dict):
+                    continue
                 if f"pmem.py {sub}" in str(h.get("command", "")):
                     existing = h
         if existing is not None:
@@ -953,9 +1003,15 @@ def main() -> int:
     common(sub.add_parser("use-repo", help="keep memory in the repo, not $HOME"), False).set_defaults(
         func=cmd_use_repo, use_global=False
     )
-    sub.add_parser("install-hook", help="register the SessionEnd hook").set_defaults(
-        func=cmd_install_hook
+    sp = sub.add_parser("install-hook", help="register the session hooks")
+    sp.add_argument("--dir", default=".", help="directory to resolve the repo from")
+    sp.add_argument(
+        "--repo",
+        action="store_true",
+        help="write to the repo's .claude/settings.json instead of $HOME "
+        "(for ephemeral hosts, where $HOME does not persist)",
     )
+    sp.set_defaults(func=cmd_install_hook, use_global=False)
 
     sp = common(sub.add_parser("log", help="append a session entry"))
     sp.add_argument("--title", help="short entry title")

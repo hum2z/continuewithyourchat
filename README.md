@@ -10,19 +10,46 @@ already gave last week. This removes that tax — and it costs nothing to run.
 
 ## Install
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/hum2z/continuewithyourchat/main/install.sh | bash
+### Easiest — let Claude install it
+
+Paste this into Claude Code, on **desktop or web**:
+
+```
+Install this Claude Code skill for me: https://github.com/hum2z/continuewithyourchat
 ```
 
-Then **start a new Claude Code session** — hooks are loaded at startup, so the
-session you install from won't have them yet.
+It'll read this page, work out whether it's running on the desktop app or the
+web, and run the right setup. If you're not sure which you're on, use this.
 
-That's the whole install. You don't need this repo checked out to use the skill.
-Re-run the same command any time to upgrade: it replaces the skill and leaves
-your memory in `~/.claude/previous` untouched.
+### Or do it yourself
 
-**Requirements:** Python 3.9+, `curl`, `tar`. The installer checks for all three
-before writing anything.
+Pick the row that matches where you run Claude Code:
+
+| | Command | Memory lives in |
+|---|---|---|
+| **Desktop app / CLI** | `curl -fsSL https://raw.githubusercontent.com/hum2z/continuewithyourchat/main/install.sh \| bash` | `~/.claude/previous` — permanent, all projects |
+| **Web** (claude.ai/code) | `curl -fsSL https://raw.githubusercontent.com/hum2z/continuewithyourchat/main/install.sh \| bash -s -- --repo` | `.claude/previous` in the repo — **commit it** |
+
+Then **start a new session** — hooks load at startup, so the session you
+install from won't have them yet.
+
+**Which am I on?** If you opened Claude Code from a terminal or the desktop
+app, it's the first row. If you're in a browser at claude.ai/code, it's the
+second.
+
+**Why they differ:** the web app runs each session in a throwaway container,
+so `~/.claude/` is wiped between sessions and has nothing to persist into. The
+repo is the only thing that survives, so `--repo` puts the skill, its memory,
+and its hooks inside `.claude/` where they travel with the clone. On web you
+must commit them:
+
+```bash
+git add .claude && git commit -m "Add previous: persistent chat memory"
+```
+
+**Requirements:** Python 3.9+, `curl`, `tar` — all checked before anything is
+written. Re-run the same command any time to upgrade; your memory is left
+alone.
 
 <details>
 <summary>Rather not pipe a script into bash?</summary>
@@ -33,7 +60,7 @@ Read it first:
 curl -fsSL https://raw.githubusercontent.com/hum2z/continuewithyourchat/main/install.sh | less
 ```
 
-Or install by hand:
+Or install by hand (desktop):
 
 ```bash
 git clone https://github.com/hum2z/continuewithyourchat.git
@@ -45,6 +72,9 @@ python3 ~/.claude/skills/previous/scripts/pmem.py install-hook
 The `mkdir` matters: without an existing `skills/` directory, `cp -r` copies the
 skill's *contents* there instead of the folder itself, and Claude Code won't
 find it.
+
+For web, add `--repo` to `install-hook` and run `pmem.py use-repo` as well, so
+both the hooks and the memory land in the repo rather than `$HOME`.
 
 </details>
 
@@ -151,25 +181,18 @@ that led nowhere.
 
 ---
 
-## Claude Code on the web
+## Notes on the web setup
 
-The web app runs each session in a throwaway container: fresh clone at the
-start, reclaimed at the end. `~/.claude/` doesn't survive that, so the default
-setup has nowhere to persist to.
+`--repo` puts three things in your repo, all of which travel with the clone:
+the skill (`.claude/skills/previous/`), its memory (`.claude/previous/`), and
+the hooks (`.claude/settings.json`). Repo skills and settings are picked up
+automatically, so a fresh web session has everything without installing
+anything.
 
-The repo does survive. Switch a project to repo-local memory:
+Already using it on desktop and want to switch a project over? `pmem.py
+use-repo` migrates that project's existing memory into the repo.
 
-```bash
-python3 ~/.claude/skills/previous/scripts/pmem.py use-repo
-git add .claude/previous && git commit -m "Add project memory"
-```
-
-Memory then lives in `.claude/previous/` and travels with the clone. Any
-existing memory for that project is migrated over. Committing the skill itself
-to `.claude/skills/previous/` makes it load in web sessions too — repo skills
-are picked up automatically, nothing to install.
-
-Two things to know before you turn this on:
+Two things to know:
 
 - **It only persists if you commit it.** The auto-capture writes into your
   working tree, but an uncommitted file dies with the container. On web, run
