@@ -17,8 +17,15 @@ recurs *every session forever*, so the expensive step has to be rare:
 | Tier | When | Model cost |
 |---|---|---|
 | **Capture** | Automatically, at session end (`SessionEnd` hook) | **Zero** — pure Python |
+| **Hint** | Automatically, at session start (`SessionStart` hook) | ~25 tokens, one line |
 | **Distil** | Next `/previous`, if captures are waiting | ~300 in / ~100 out per session |
 | **Consolidate** | Once ~5 log entries have built up | One rewrite, amortised |
+
+The hint deliberately stops at a pointer. `SessionStart` stdout does reach the
+model, so it *could* inject the whole digest — but that would charge every
+session for memory, including ones unrelated to the remembered work. Loading
+stays an explicit `/previous`. If a hint appears and the user's request clearly
+depends on that history, offer to load rather than loading unasked.
 
 Capture is free because it never involves you: a script reads the raw
 transcript and keeps only what a human actually typed. In a real session that
@@ -49,7 +56,7 @@ python3 <skill>/scripts/pmem.py clear-pending   # drop captures once distilled
 python3 <skill>/scripts/pmem.py backup          # snapshot MEMORY.md before rewriting
 python3 <skill>/scripts/pmem.py archive         # rotate log.md
 python3 <skill>/scripts/pmem.py list            # every project with memory
-python3 <skill>/scripts/pmem.py install-hook    # turn on automatic capture
+python3 <skill>/scripts/pmem.py install-hook    # turn on both hooks
 ```
 
 `--global` targets the cross-project layer. `PREVIOUS_AUTO=0` pauses capture.

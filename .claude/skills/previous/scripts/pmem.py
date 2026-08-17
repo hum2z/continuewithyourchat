@@ -696,6 +696,64 @@ def cmd_capture(args) -> int:
     return 0
 
 
+def _section_items(md: str, heading: str) -> int:
+    """Count bullets under a `## heading`, for the one-line SessionStart hint."""
+    match = re.search(
+        rf"^## {re.escape(heading)}\s*$(.*?)(?=^## |\Z)", md, re.M | re.S
+    )
+    if not match:
+        return 0
+    return len(re.findall(r"^\s*[-*] ", match.group(1), re.M))
+
+
+def cmd_hint(args) -> int:
+    """SessionStart hook: print at most one line saying memory exists.
+
+    SessionStart is one of the few events whose stdout reaches the model, which
+    makes it tempting to inject the whole digest here. That would put the full
+    restore cost on every session, including the ones that have nothing to do
+    with the remembered work — so this only ever prints a pointer, and loading
+    stays an explicit `/previous`.
+    """
+    if os.environ.get("PREVIOUS_AUTO", "1") == "0":
+        return 0
+
+    payload = {}
+    try:
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw.strip() else {}
+    except (json.JSONDecodeError, OSError):
+        payload = {}
+
+    start = Path(payload.get("cwd") or args.dir or ".").resolve()
+    try:
+        slug, label, _ = scope_for(start)
+    except OSError:
+        return 0
+
+    proj = PROJECTS_DIR / slug
+    memory = _strip_scaffolding(_read(proj / "MEMORY.md"))
+    pending = _pending_files(proj)
+    if not memory and not pending:
+        return 0  # nothing remembered here; stay out of the way
+
+    bits = []
+    threads = _section_items(memory, "Open threads")
+    if threads:
+        bits.append(f"{threads} open thread{'s' * (threads != 1)}")
+    if pending:
+        bits.append(f"{len(pending)} new session{'s' * (len(pending) != 1)} captured")
+    if not bits:
+        bits.append("digest available")
+
+    cost = _tokens(memory + _tail_entries(_read(proj / "log.md"), 3))
+    print(
+        f"[previous] Memory for {label} — {', '.join(bits)}. "
+        f"Run /previous to load it (~{cost} tokens)."
+    )
+    return 0
+
+
 def _pending_files(d: Path) -> list[Path]:
     pending = d / "pending"
     return sorted(pending.glob("*.md")) if pending.exists() else []
@@ -744,29 +802,35 @@ def cmd_install_hook(args) -> int:
     if settings.exists():
         shutil.copy2(settings, settings.with_suffix(".json.bak"))
 
-    command = f"python3 {Path(__file__).resolve()} capture"
+    script = Path(__file__).resolve()
     hooks = conf.setdefault("hooks", {})
-    groups = hooks.setdefault("SessionEnd", [])
+    results = []
 
-    for group in groups:
-        for h in group.get("hooks", []):
-            if "pmem.py capture" in str(h.get("command", "")):
-                h["command"] = command
-                settings.write_text(json.dumps(conf, indent=2), encoding="utf-8")
-                print(f"hook already present in {settings} — refreshed its path")
-                return 0
+    for event, sub in (("SessionEnd", "capture"), ("SessionStart", "hint")):
+        command = f"python3 {script} {sub}"
+        groups = hooks.setdefault(event, [])
+        existing = None
+        for group in groups:
+            for h in group.get("hooks", []):
+                if f"pmem.py {sub}" in str(h.get("command", "")):
+                    existing = h
+        if existing is not None:
+            existing["command"] = command
+            results.append(f"  {event}: refreshed")
+        else:
+            groups.append(
+                {
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": command, "timeout": 30}],
+                }
+            )
+            results.append(f"  {event}: installed ({command})")
 
-    groups.append(
-        {
-            "matcher": "*",
-            "hooks": [{"type": "command", "command": command, "timeout": 30}],
-        }
-    )
     settings.write_text(json.dumps(conf, indent=2), encoding="utf-8")
     print(
-        f"installed SessionEnd hook in {settings}\n"
-        f"  {command}\n"
-        "Sessions are now captured automatically. Set PREVIOUS_AUTO=0 to pause it."
+        "\n".join([f"updated {settings}"] + results)
+        + "\n\nSessions are captured on exit, and new sessions get a one-line"
+        "\npointer when memory exists. Set PREVIOUS_AUTO=0 to pause both."
     )
     return 0
 
@@ -803,6 +867,9 @@ def main() -> int:
     sp.add_argument("--transcript", help="transcript path (else read hook JSON on stdin)")
     sp.set_defaults(func=cmd_capture, use_global=False)
 
+    common(sub.add_parser("hint", help="SessionStart one-line pointer"), False).set_defaults(
+        func=cmd_hint, use_global=False
+    )
     common(sub.add_parser("pending", help="show captures awaiting distillation"), False).set_defaults(
         func=cmd_pending, use_global=False
     )

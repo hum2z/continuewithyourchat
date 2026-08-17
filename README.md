@@ -40,7 +40,23 @@ python3 ~/.claude/skills/previous/scripts/pmem.py install-hook
 
 It merges into your existing `~/.claude/settings.json` (backing it up first,
 and refusing to touch it if it isn't valid JSON). Set `PREVIOUS_AUTO=0` to
-pause capture without uninstalling.
+pause it without uninstalling.
+
+## And a nudge when you start
+
+The same command installs a `SessionStart` hook that prints **one line** when
+memory exists for the project you just opened:
+
+```
+[previous] Memory for hum2z/continuewithyourchat — 1 open thread, 2 new
+sessions captured. Run /previous to load it (~185 tokens).
+```
+
+~25 tokens, and it quotes the load cost so you can decide before paying it.
+It could inject the whole digest — `SessionStart` output does reach the model —
+but that would charge every session for memory, including ones that have
+nothing to do with the remembered work. So it points, and loading stays yours.
+Nothing is printed at all when a project has no memory.
 
 ## What it costs you
 
