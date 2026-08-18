@@ -860,6 +860,23 @@ def cmd_use_repo(args) -> int:
     return 0
 
 
+def _hook_command(sub: str, repo_mode: bool) -> str:
+    """The shell command a hook entry runs.
+
+    Repo settings get committed and read back on another machine, often at a
+    different path with a different interpreter, so both halves must stay
+    portable. A local install is only ever read by this machine, so it pins the
+    exact interpreter known to work — which may not be called `python3`.
+    """
+    if repo_mode:
+        return (
+            "python3 ${CLAUDE_PROJECT_DIR}/.claude/skills/previous"
+            f"/scripts/pmem.py {sub}"
+        )
+    script = Path(__file__).resolve()
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} {sub}"
+
+
 def die_shape(key: str, found: str, settings: Path) -> None:
     print(
         f"{settings} has '{key}' as {found}, which is not a shape this "
@@ -879,6 +896,29 @@ def cmd_install_hook(args) -> int:
         settings = project_root(Path(args.dir).resolve()) / ".claude" / "settings.json"
     else:
         settings = Path.home() / ".claude" / "settings.json"
+
+    if args.print_only:
+        # Some setups deny an agent write access to settings.json. Rather than
+        # leave the automation unreachable, emit the block for a human to paste.
+        entries = {
+            event: [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": _hook_command(sub, args.repo),
+                            "timeout": 30,
+                        }
+                    ],
+                }
+            ]
+            for event, sub in (("SessionEnd", "capture"), ("SessionStart", "hint"))
+        }
+        print(f"# Merge into the \"hooks\" object of {settings}\n")
+        print(json.dumps({"hooks": entries}, indent=2))
+        return 0
+
     settings.parent.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -909,19 +949,7 @@ def cmd_install_hook(args) -> int:
     results = []
 
     for event, sub in (("SessionEnd", "capture"), ("SessionStart", "hint")):
-        if args.repo:
-            # Repo settings get committed and read back on a different machine
-            # — often at a different path, with a different interpreter. Both
-            # halves have to stay portable, so resolve the project at run time
-            # and trust `python3` to be on PATH.
-            command = (
-                "python3 ${CLAUDE_PROJECT_DIR}/.claude/skills/previous"
-                f"/scripts/pmem.py {sub}"
-            )
-        else:
-            # Local install: this machine is the only reader, so pin the exact
-            # interpreter known to work — it may not be called `python3`.
-            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} {sub}"
+        command = _hook_command(sub, args.repo)
         if hooks.get(event) is None:
             hooks[event] = []
         if not isinstance(hooks[event], list):
@@ -1011,7 +1039,13 @@ def main() -> int:
         help="write to the repo's .claude/settings.json instead of $HOME "
         "(for ephemeral hosts, where $HOME does not persist)",
     )
-    sp.set_defaults(func=cmd_install_hook, use_global=False)
+    sp.add_argument(
+        "--print",
+        dest="print_only",
+        action="store_true",
+        help="print the JSON to paste by hand instead of writing anything",
+    )
+    sp.set_defaults(func=cmd_install_hook, use_global=False, print_only=False)
 
     sp = common(sub.add_parser("log", help="append a session entry"))
     sp.add_argument("--title", help="short entry title")

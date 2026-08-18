@@ -15,11 +15,15 @@ already gave last week. This removes that tax — and it costs nothing to run.
 Paste this into Claude Code, on **desktop or web**:
 
 ```
-Install this Claude Code skill for me: https://github.com/hum2z/continuewithyourchat
+Install the "previous" skill by running its installer:
+https://raw.githubusercontent.com/hum2z/continuewithyourchat/main/install.sh
+Download and run that script (add --repo if this is Claude Code on the web).
+Do not write the skill files yourself — the installer fetches them.
 ```
 
-It'll read this page, work out whether it's running on the desktop app or the
-web, and run the right setup. If you're not sure which you're on, use this.
+That last line matters. Asked only to "install this skill", Claude will often
+read the README and helpfully *reimplement* the whole thing from scratch —
+which produces a lookalike that misses later fixes. Point it at the installer.
 
 ### Or do it yourself
 
@@ -87,6 +91,53 @@ rm -rf ~/.claude/previous            # remove your memory too, if you want
 
 Then delete the two `pmem.py` entries from `hooks` in `~/.claude/settings.json`.
 To switch it off without uninstalling, set `PREVIOUS_AUTO=0`.
+
+---
+
+## If the install goes wrong
+
+**Claude rewrote the skill instead of downloading it.** You'll see it creating
+`SKILL.md`, `memory-format.md` and `pmem.py` from scratch, hundreds of lines at
+a time. It read this README and reimplemented it. The result looks right and
+misses every fix made since. Delete `~/.claude/skills/previous` and run the
+installer yourself, or use the exact prompt at the top of this page — the "do
+not write the files yourself" line is what prevents it.
+
+**"Failed to install hooks" / Bash or Python was blocked.** Claude Code's
+permission modes can stop an agent writing to `settings.json` or running a
+script, and no amount of retrying gets past it — it's a permission boundary,
+not a bug. Two ways through:
+
+*Run the installer yourself, in a real terminal:*
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hum2z/continuewithyourchat/main/install.sh | bash
+```
+
+*Or paste the hooks in by hand.* This prints the exact JSON and writes nothing:
+
+```bash
+python3 ~/.claude/skills/previous/scripts/pmem.py install-hook --print
+```
+
+Merge that into the `hooks` object in `~/.claude/settings.json` yourself. Add
+`--repo` if you're on the web app.
+
+**The skill still works without hooks.** They only automate capture. Without
+them, `/previous save` and `/previous` both work exactly as documented — you
+just have to say when.
+
+### Windows
+
+`install.sh` needs a POSIX shell, so run it from **Git Bash** (ships with Git
+for Windows) or WSL, not PowerShell. Everything after install is
+platform-agnostic — hook commands are written with the full path to the
+interpreter that ran the installer, so `python3` not being on PATH doesn't
+matter.
+
+If you only have PowerShell, do it by hand: download the repo zip, copy
+`.claude/skills/previous` into `%USERPROFILE%\.claude\skills\`, then run
+`python ...\pmem.py install-hook`.
 
 ---
 
